@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>Nequi · Administración</title>
+<style>
+  :root { --morado:#200020; --rosa:#DE0080; --lila:#EBE7F5; --gris:#6b6676; }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin:0; font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; background:#FCF7FB; color:var(--morado); }
+  header { background:var(--morado); color:#fff; padding:14px 24px; display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  header h1 { margin:0; font-size:20px; }
+  header .quien { font-size:13px; opacity:.85; display:flex; gap:12px; align-items:center; }
+  main { max-width:980px; margin:0 auto; padding:24px; display:grid; gap:24px; }
+  section { background:#fff; border:1px solid var(--lila); border-radius:10px; padding:20px; }
+  h2 { margin:0 0 14px; font-size:17px; }
+  form { display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; }
+  label { display:flex; flex-direction:column; gap:4px; font-size:13px; color:var(--gris); }
+  input { padding:10px 12px; border:1px solid #d9d4e6; border-radius:6px; font-size:15px; min-width:160px; }
+  button { background:var(--rosa); color:#fff; border:0; border-radius:6px; padding:11px 18px; font-size:15px; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  button.sec { background:var(--lila); color:var(--morado); padding:7px 12px; font-size:13px; }
+  header button.sec { background:rgba(255,255,255,.15); color:#fff; }
+  table { width:100%; border-collapse:collapse; font-size:15px; }
+  th, td { text-align:left; padding:10px 8px; border-bottom:1px solid var(--lila); }
+  th { font-size:12px; color:var(--gris); text-transform:uppercase; letter-spacing:.04em; }
+  td.num, th.num { text-align:right; }
+  #mensaje, #errorLogin { min-height:22px; font-size:14px; }
+  .ok { color:#0a7a3e; } .error { color:#c62828; }
+  #vistaLogin { max-width:380px; margin:12vh auto 0; padding:0 20px; }
+  #vistaLogin form { flex-direction:column; align-items:stretch; }
+  #vistaLogin input { width:100%; }
+  #avisoLocal { background:#FFF4E5; border:1px solid #F0C27B; color:#7A4B00; border-radius:8px; padding:10px 12px; font-size:13px; margin-bottom:12px; }
+</style>
+</head>
+<body>
+
+<!-- ============ INICIO DE SESIÓN ============ -->
+<div id="vistaLogin">
+  <section>
+    <h2>Nequi · Administración</h2>
+    <div id="avisoLocal" hidden>Abriste esta página como archivo local. En el celular el inicio de sesión no funciona así: ábrela desde su dirección https.</div>
+    <form id="formLogin" autocomplete="on">
+      <label>Correo<input id="logCorreo" type="email" autocomplete="username" required></label>
+      <label>Contraseña<input id="logClave" type="password" autocomplete="current-password" required></label>
+      <button type="submit" id="botonLogin">Entrar</button>
+      <div id="errorLogin" class="error" role="alert"></div>
+    </form>
+  </section>
+</div>
+
+<!-- ============ PANEL (solo se muestra a administradores) ============ -->
+<div id="vistaPanel" hidden>
+  <header>
+    <h1>Nequi · Administración de usuarios y saldo</h1>
+    <div class="quien"><span id="correoAdmin"></span><button class="sec" id="botonSalir" type="button">Salir</button></div>
+  </header>
+  <main>
+    <section>
+      <h2>Recargar saldo</h2>
+      <form id="formRecarga">
+        <label>Celular (10 dígitos)<input id="recCelular" inputmode="numeric" maxlength="10" required></label>
+        <label>Monto en pesos<input id="recMonto" inputmode="numeric" required></label>
+        <button type="submit">Recargar</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>Crear o editar usuario</h2>
+      <form id="formUsuario">
+        <label>Celular (10 dígitos)<input id="usrCelular" inputmode="numeric" maxlength="10" required></label>
+        <label>Nombre<input id="usrNombre" maxlength="40" required></label>
+        <label>Saldo inicial en pesos (solo al crear)<input id="usrSaldo" inputmode="numeric" value="0"></label>
+        <button type="submit">Guardar usuario</button>
+      </form>
+    </section>
+
+    <div id="mensaje" role="status"></div>
+
+    <section>
+      <h2>Usuarios</h2>
+      <table>
+        <thead><tr><th>Celular</th><th>Nombre</th><th class="num">Saldo</th><th></th></tr></thead>
+        <tbody id="tabla"></tbody>
+      </table>
+    </section>
+
+    <section id="panelMov" hidden>
+      <h2 id="tituloMov">Movimientos</h2>
+      <table>
+        <thead><tr><th>Fecha</th><th>Tipo</th><th class="num">Monto</th><th class="num">Saldo después</th><th>Detalle</th></tr></thead>
+        <tbody id="tablaMov"></tbody>
+      </table>
+    </section>
+  </main>
+</div>
+
+<script>
+  // Si se abrió como archivo (file:// o content://) se muestra el aviso
+  if (location.protocol !== 'http:' && location.protocol !== 'https:') {
+    document.getElementById('avisoLocal').hidden = false;
+  }
+  // Si Firebase no cargó en 5 s (sin internet o navegador que no soporta módulos), se avisa
+  setTimeout(function () {
+    if (!window.__panelListo) {
+      var e = document.getElementById('errorLogin');
+      if (e && !e.textContent) e.textContent = 'No se pudo cargar Firebase. Revisa tu internet o abre esta página desde su dirección https.';
+    }
+  }, 5000);
+</script>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
+import { getAuth, setPersistence, browserSessionPersistence, inMemoryPersistence, signInWithEmailAndPassword,
+         onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
+import { getFirestore, collection, doc, getDoc, onSnapshot, runTransaction,
+         query, orderBy, limit, serverTimestamp } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
+
+// Configuración web del proyecto "nequi-c58a2". Esta llave NO es un secreto (identifica el proyecto):
+// la seguridad real está en el inicio de sesión de abajo y en firestore.rules.
+const firebaseConfig = {
+  apiKey: "AIzaSyAmfePJLdhVR_0ZHdAed6VTCqYv2VrIUgk",
+  authDomain: "nequi-c58a2.firebaseapp.com",
+  projectId: "nequi-c58a2",
+  storageBucket: "nequi-c58a2.firebasestorage.app",
+  messagingSenderId: "17960916446",
+  appId: "1:17960916446:web:18c9aaacd51a1a9864b94f"
+};
+
+window.__panelListo = true;      // el módulo arrancó (lo revisa el script de arriba)
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const $ = (id) => document.getElementById(id);
+const pesos = (centavos) => new Intl.NumberFormat('es-CO', { style:'currency', currency:'COP', minimumFractionDigits:2 }).format(centavos / 100);
+const soloDigitos = (v) => v.replace(/\D/g, '');
+const MAX_RECARGA_PESOS = 50_000_000;          // tope por recarga: evita errores de digitación
+
+function aviso(texto, ok = true) { const e = $('mensaje'); e.textContent = texto; e.className = ok ? 'ok' : 'error'; }
+
+// ====================== SESIÓN ======================
+// La sesión dura solo mientras la pestaña esté abierta.
+// Si el navegador bloquea el almacenamiento (pasa al abrir un archivo local en el celular), la sesión queda solo en memoria.
+try { await setPersistence(auth, browserSessionPersistence); }
+catch (e) { console.warn('Sin almacenamiento, sesión en memoria:', e); await setPersistence(auth, inMemoryPersistence); }
+
+// Traduce el error de Firebase a un mensaje útil (sin revelar si el correo existe)
+const MSG_CREDENCIALES = 'Correo o contraseña incorrectos.';
+function textoErrorLogin(err) {
+  switch (err && err.code) {
+    case 'auth/network-request-failed': return 'Sin conexión con Firebase. Revisa tu internet.';
+    case 'auth/operation-not-supported-in-this-environment': return 'Este navegador no permite iniciar sesión desde un archivo local. Abre la página desde su dirección https.';
+    case 'auth/too-many-requests': return 'Demasiados intentos. Espera unos minutos.';
+    case 'auth/operation-not-allowed': return 'El inicio de sesión con correo no está activado en Firebase.';
+    case 'auth/user-disabled': return 'Esta cuenta está deshabilitada.';
+    case 'auth/invalid-email': return 'El correo no es válido.';
+    case 'auth/invalid-api-key': return 'La llave de Firebase de esta página no es válida.';
+    default: return MSG_CREDENCIALES;          // credenciales incorrectas (cualquier variante)
+  }
+}
+
+let fallos = 0;
+$('formLogin').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  $('errorLogin').textContent = '';
+  $('botonLogin').disabled = true;
+  try {
+    await signInWithEmailAndPassword(auth, $('logCorreo').value.trim(), $('logClave').value);
+    fallos = 0;
+  } catch (err) {
+    console.error('Error de inicio de sesión:', err);
+    const texto = textoErrorLogin(err);
+    $('errorLogin').textContent = texto;
+    if (texto === MSG_CREDENCIALES) fallos++;
+    if (fallos >= 5) {                          // pausa de 30 s después de 5 intentos fallidos
+      $('errorLogin').textContent = 'Demasiados intentos. Espera 30 segundos.';
+      setTimeout(() => { fallos = 0; $('botonLogin').disabled = false; }, 30000);
+      return;
+    }
+  }
+  $('botonLogin').disabled = false;
+  $('logClave').value = '';
+});
+
+$('botonSalir').addEventListener('click', () => signOut(auth));
+
+// Cierre automático por inactividad (15 minutos)
+let temporizador = null;
+function reiniciarInactividad() {
+  clearTimeout(temporizador);
+  temporizador = setTimeout(() => signOut(auth), 15 * 60 * 1000);
+}
+['click', 'keydown', 'mousemove', 'touchstart'].forEach(ev => document.addEventListener(ev, () => { if (auth.currentUser) reiniciarInactividad(); }));
+
+let cancelarUsuarios = null, cancelarMov = null;
+function limpiarPanel() {
+  if (cancelarUsuarios) cancelarUsuarios(); if (cancelarMov) cancelarMov();
+  cancelarUsuarios = cancelarMov = null;
+  $('tabla').textContent = ''; $('tablaMov').textContent = ''; $('panelMov').hidden = true;
+  $('mensaje').textContent = '';
+}
+
+onAuthStateChanged(auth, async (user) => {
+  limpiarPanel();
+  if (!user) { clearTimeout(temporizador); $('vistaPanel').hidden = true; $('vistaLogin').hidden = false; return; }
+
+  // Solo entran los administradores: documentos admins/{uid} creados a mano en la consola de Firebase
+  let esAdmin = false, falloLectura = null;
+  try { esAdmin = (await getDoc(doc(db, 'admins', user.uid))).exists(); } catch (e) { falloLectura = e; console.error(e); }
+  if (!esAdmin) {
+    await signOut(auth);
+    $('errorLogin').textContent = (falloLectura && falloLectura.code !== 'permission-denied')
+      ? 'No se pudo comprobar el permiso (' + falloLectura.code + '). Revisa tu internet.'
+      : 'Tu cuenta no tiene permiso de administrador.';
+    return;
+  }
+  $('correoAdmin').textContent = user.email || '';
+  $('vistaLogin').hidden = true; $('vistaPanel').hidden = false;
+  reiniciarInactividad();
+  escucharUsuarios();
+});
+
+// ====================== PANEL ======================
+function escucharUsuarios() {
+  cancelarUsuarios = onSnapshot(collection(db, 'usuarios'), (snap) => {
+    const tbody = $('tabla'); tbody.textContent = '';
+    const filas = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (a.nombre || '').localeCompare(b.nombre || ''));
+    for (const u of filas) {
+      const tr = document.createElement('tr');
+      for (const [txt, clase] of [[u.id], [u.nombre || ''], [pesos(u.saldo || 0), 'num']]) {
+        const td = document.createElement('td'); td.textContent = txt; if (clase) td.className = clase; tr.appendChild(td);
+      }
+      const tdAcc = document.createElement('td');
+      const bRec = document.createElement('button'); bRec.className = 'sec'; bRec.textContent = 'Recargar';
+      bRec.onclick = () => { $('recCelular').value = u.id; $('recMonto').focus(); };
+      const bEd = document.createElement('button'); bEd.className = 'sec'; bEd.textContent = 'Editar'; bEd.style.marginLeft = '6px';
+      bEd.onclick = () => { $('usrCelular').value = u.id; $('usrNombre').value = u.nombre || ''; $('usrNombre').focus(); };
+      const bMov = document.createElement('button'); bMov.className = 'sec'; bMov.textContent = 'Movimientos'; bMov.style.marginLeft = '6px';
+      bMov.onclick = () => verMovimientos(u);
+      tdAcc.append(bRec, bEd, bMov); tr.appendChild(tdAcc);
+      tbody.appendChild(tr);
+    }
+  }, (e) => aviso('No se pudo leer la base de datos: ' + e.message, false));
+}
+
+function verMovimientos(u) {
+  if (cancelarMov) cancelarMov();
+  $('panelMov').hidden = false;
+  $('tituloMov').textContent = 'Movimientos de ' + (u.nombre || u.id);
+  const q = query(collection(db, 'usuarios', u.id, 'movimientos'), orderBy('fecha', 'desc'), limit(20));
+  cancelarMov = onSnapshot(q, (snap) => {
+    const tbody = $('tablaMov'); tbody.textContent = '';
+    for (const d of snap.docs) {
+      const m = d.data(); const tr = document.createElement('tr');
+      const fecha = m.fecha && m.fecha.toDate ? m.fecha.toDate().toLocaleString('es-CO') : '';
+      const detalle = m.tipo === 'envio' ? ('a ' + (m.nombreDestinatario || m.destinatario || ''))
+                    : (m.tipo === 'recarga' && m.por ? ('por ' + m.por) : '');
+      for (const [txt, clase] of [[fecha], [m.tipo || ''], [pesos(m.monto || 0), 'num'], [pesos(m.saldoDespues || 0), 'num'], [detalle]]) {
+        const td = document.createElement('td'); td.textContent = txt; if (clase) td.className = clase; tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+  });
+}
+
+// ---- recargar (misma transacción que usa la app; queda registrado quién la hizo) ----
+$('formRecarga').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const celular = soloDigitos($('recCelular').value);
+  const pesosMonto = parseInt(soloDigitos($('recMonto').value) || '0', 10);
+  if (celular.length !== 10 || pesosMonto <= 0) { aviso('Revisa el celular (10 dígitos) y el monto.', false); return; }
+  if (pesosMonto > MAX_RECARGA_PESOS) { aviso('El monto supera el máximo permitido por recarga (' + pesos(MAX_RECARGA_PESOS * 100) + ').', false); return; }
+  if (!confirm('¿Recargar ' + pesos(pesosMonto * 100) + ' al número ' + celular + '?')) return;
+
+  const montoCentavos = pesosMonto * 100;
+  const referencia = 'R' + Date.now() + Math.floor(Math.random() * 1000);
+  const quien = auth.currentUser ? auth.currentUser.email : '';
+  try {
+    const nuevo = await runTransaction(db, async (t) => {
+      const ref = doc(db, 'usuarios', celular);
+      const snap = await t.get(ref);
+      if (!snap.exists()) throw new Error('Ese número no está registrado.');
+      const total = (snap.data().saldo || 0) + montoCentavos;
+      t.update(ref, { saldo: total });
+      t.set(doc(db, 'usuarios', celular, 'movimientos', referencia),
+            { tipo: 'recarga', monto: montoCentavos, saldoDespues: total, por: quien, fecha: serverTimestamp() });
+      return total;
+    });
+    aviso('Recarga lista. Nuevo saldo de ' + celular + ': ' + pesos(nuevo));
+    $('recMonto').value = '';
+  } catch (err) { aviso(err.message, false); }
+});
+
+// ---- crear / editar usuario ----
+$('formUsuario').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const celular = soloDigitos($('usrCelular').value);
+  const nombre = $('usrNombre').value.trim();
+  if (celular.length !== 10 || !nombre) { aviso('Escribe un celular de 10 dígitos y un nombre.', false); return; }
+  const ref = doc(db, 'usuarios', celular);
+  try {
+    await runTransaction(db, async (t) => {
+      const snap = await t.get(ref);
+      if (snap.exists()) { t.update(ref, { nombre }); }                       // ya existe: solo cambia el nombre
+      else {
+        const saldo = parseInt(soloDigitos($('usrSaldo').value) || '0', 10) * 100;
+        t.set(ref, { nombre, saldo, creado: serverTimestamp() });
+      }
+    });
+    aviso('Usuario guardado: ' + nombre + ' (' + celular + ').');
+  } catch (err) { aviso(err.message, false); }
+});
+</script>
+</body>
+</html>

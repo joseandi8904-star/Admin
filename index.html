@@ -30,10 +30,13 @@
   td.num, th.num { text-align:right; }
   #mensaje, #errorLogin { min-height:22px; font-size:14px; }
   .ok { color:#0a7a3e; } .error { color:#c62828; }
+  .nota { font-size:13px; color:var(--gris); margin:0 0 12px; }
+  .sol { display:flex; flex-wrap:wrap; gap:10px; align-items:center; padding:12px 0; border-bottom:1px solid var(--lila); }
+  .sol .info { flex:1 1 220px; }
+  .sol .nota { margin:0; }
   #vistaLogin { max-width:380px; margin:12vh auto 0; padding:0 20px; }
   #vistaLogin form { flex-direction:column; align-items:stretch; }
   #vistaLogin input { width:100%; }
-  #avisoLocal { background:#FFF4E5; border:1px solid #F0C27B; color:#7A4B00; border-radius:8px; padding:10px 12px; font-size:13px; margin-bottom:12px; }
 </style>
 </head>
 <body>
@@ -42,7 +45,6 @@
 <div id="vistaLogin">
   <section>
     <h2>Nequi · Administración</h2>
-    <div id="avisoLocal" hidden>Abriste esta página como archivo local. En el celular el inicio de sesión no funciona así: ábrela desde su dirección https.</div>
     <form id="formLogin" autocomplete="on">
       <label>Correo<input id="logCorreo" type="email" autocomplete="username" required></label>
       <label>Contraseña<input id="logClave" type="password" autocomplete="current-password" required></label>
@@ -78,12 +80,26 @@
       </form>
     </section>
 
+    <div id="cajaPin" hidden style="margin:12px 0;padding:14px 16px;border:2px solid #200020;border-radius:10px;background:#fff7d6">
+      <div id="cajaPinTexto" style="font-weight:600"></div>
+      <div id="cajaPinValor" style="font-size:34px;letter-spacing:10px;font-weight:700;margin:6px 0"></div>
+      <div class="nota">Entrégalo al usuario ahora: por seguridad no se vuelve a mostrar (si lo olvida, usa "Nuevo PIN").</div>
+      <button class="sec" type="button" id="cajaPinCerrar" style="margin-top:8px">Ocultar</button>
+    </div>
+
     <div id="mensaje" role="status"></div>
+
+    <section>
+      <h2>Solicitudes de recarga (ruleta)</h2>
+      <p class="nota">Cada moneda vale <b id="valorMoneda"></b>. Las monedas se leen de la base de datos del jugador, no de lo que diga la app.
+        Al aprobar se suma el saldo al usuario y se descuentan esas monedas del jugador.</p>
+      <div id="listaSolicitudes"></div>
+    </section>
 
     <section>
       <h2>Usuarios</h2>
       <table>
-        <thead><tr><th>Celular</th><th>Nombre</th><th class="num">Saldo</th><th></th></tr></thead>
+        <thead><tr><th>Celular</th><th>Nombre</th><th class="num">Saldo</th><th>PIN</th><th></th></tr></thead>
         <tbody id="tabla"></tbody>
       </table>
     </section>
@@ -98,26 +114,12 @@
   </main>
 </div>
 
-<script>
-  // Si se abrió como archivo (file:// o content://) se muestra el aviso
-  if (location.protocol !== 'http:' && location.protocol !== 'https:') {
-    document.getElementById('avisoLocal').hidden = false;
-  }
-  // Si Firebase no cargó en 5 s (sin internet o navegador que no soporta módulos), se avisa
-  setTimeout(function () {
-    if (!window.__panelListo) {
-      var e = document.getElementById('errorLogin');
-      if (e && !e.textContent) e.textContent = 'No se pudo cargar Firebase. Revisa tu internet o abre esta página desde su dirección https.';
-    }
-  }, 5000);
-</script>
-
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
-import { getAuth, setPersistence, browserSessionPersistence, inMemoryPersistence, signInWithEmailAndPassword,
+import { getAuth, setPersistence, browserSessionPersistence, signInWithEmailAndPassword,
          onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
 import { getFirestore, collection, doc, getDoc, onSnapshot, runTransaction,
-         query, orderBy, limit, serverTimestamp } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
+         query, orderBy, limit, where, updateDoc, serverTimestamp, getDocs } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
 
 // Configuración web del proyecto "nequi-c58a2". Esta llave NO es un secreto (identifica el proyecto):
 // la seguridad real está en el inicio de sesión de abajo y en firestore.rules.
@@ -130,7 +132,6 @@ const firebaseConfig = {
   appId: "1:17960916446:web:18c9aaacd51a1a9864b94f"
 };
 
-window.__panelListo = true;      // el módulo arrancó (lo revisa el script de arriba)
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
@@ -138,29 +139,13 @@ const $ = (id) => document.getElementById(id);
 const pesos = (centavos) => new Intl.NumberFormat('es-CO', { style:'currency', currency:'COP', minimumFractionDigits:2 }).format(centavos / 100);
 const soloDigitos = (v) => v.replace(/\D/g, '');
 const MAX_RECARGA_PESOS = 50_000_000;          // tope por recarga: evita errores de digitación
+const VALOR_MONEDA_PESOS = 1;                  // cuántos pesos vale cada moneda de la ruleta (cámbialo aquí)
 
 function aviso(texto, ok = true) { const e = $('mensaje'); e.textContent = texto; e.className = ok ? 'ok' : 'error'; }
 
 // ====================== SESIÓN ======================
-// La sesión dura solo mientras la pestaña esté abierta.
-// Si el navegador bloquea el almacenamiento (pasa al abrir un archivo local en el celular), la sesión queda solo en memoria.
-try { await setPersistence(auth, browserSessionPersistence); }
-catch (e) { console.warn('Sin almacenamiento, sesión en memoria:', e); await setPersistence(auth, inMemoryPersistence); }
-
-// Traduce el error de Firebase a un mensaje útil (sin revelar si el correo existe)
-const MSG_CREDENCIALES = 'Correo o contraseña incorrectos.';
-function textoErrorLogin(err) {
-  switch (err && err.code) {
-    case 'auth/network-request-failed': return 'Sin conexión con Firebase. Revisa tu internet.';
-    case 'auth/operation-not-supported-in-this-environment': return 'Este navegador no permite iniciar sesión desde un archivo local. Abre la página desde su dirección https.';
-    case 'auth/too-many-requests': return 'Demasiados intentos. Espera unos minutos.';
-    case 'auth/operation-not-allowed': return 'El inicio de sesión con correo no está activado en Firebase.';
-    case 'auth/user-disabled': return 'Esta cuenta está deshabilitada.';
-    case 'auth/invalid-email': return 'El correo no es válido.';
-    case 'auth/invalid-api-key': return 'La llave de Firebase de esta página no es válida.';
-    default: return MSG_CREDENCIALES;          // credenciales incorrectas (cualquier variante)
-  }
-}
+// La sesión dura solo mientras la pestaña esté abierta
+await setPersistence(auth, browserSessionPersistence);
 
 let fallos = 0;
 $('formLogin').addEventListener('submit', async (e) => {
@@ -171,10 +156,9 @@ $('formLogin').addEventListener('submit', async (e) => {
     await signInWithEmailAndPassword(auth, $('logCorreo').value.trim(), $('logClave').value);
     fallos = 0;
   } catch (err) {
-    console.error('Error de inicio de sesión:', err);
-    const texto = textoErrorLogin(err);
-    $('errorLogin').textContent = texto;
-    if (texto === MSG_CREDENCIALES) fallos++;
+    fallos++;
+    // mensaje genérico: no se revela si el correo existe
+    $('errorLogin').textContent = 'Correo o contraseña incorrectos.';
     if (fallos >= 5) {                          // pausa de 30 s después de 5 intentos fallidos
       $('errorLogin').textContent = 'Demasiados intentos. Espera 30 segundos.';
       setTimeout(() => { fallos = 0; $('botonLogin').disabled = false; }, 30000);
@@ -195,10 +179,11 @@ function reiniciarInactividad() {
 }
 ['click', 'keydown', 'mousemove', 'touchstart'].forEach(ev => document.addEventListener(ev, () => { if (auth.currentUser) reiniciarInactividad(); }));
 
-let cancelarUsuarios = null, cancelarMov = null;
+let cancelarUsuarios = null, cancelarMov = null, cancelarSolic = null, tokenSolic = 0;
 function limpiarPanel() {
-  if (cancelarUsuarios) cancelarUsuarios(); if (cancelarMov) cancelarMov();
-  cancelarUsuarios = cancelarMov = null;
+  if (cancelarUsuarios) cancelarUsuarios(); if (cancelarMov) cancelarMov(); if (cancelarSolic) cancelarSolic();
+  cancelarUsuarios = cancelarMov = cancelarSolic = null; tokenSolic++;
+  $('listaSolicitudes').textContent = '';
   $('tabla').textContent = ''; $('tablaMov').textContent = ''; $('panelMov').hidden = true;
   $('mensaje').textContent = '';
 }
@@ -208,19 +193,18 @@ onAuthStateChanged(auth, async (user) => {
   if (!user) { clearTimeout(temporizador); $('vistaPanel').hidden = true; $('vistaLogin').hidden = false; return; }
 
   // Solo entran los administradores: documentos admins/{uid} creados a mano en la consola de Firebase
-  let esAdmin = false, falloLectura = null;
-  try { esAdmin = (await getDoc(doc(db, 'admins', user.uid))).exists(); } catch (e) { falloLectura = e; console.error(e); }
+  let esAdmin = false;
+  try { esAdmin = (await getDoc(doc(db, 'admins', user.uid))).exists(); } catch (e) { esAdmin = false; }
   if (!esAdmin) {
     await signOut(auth);
-    $('errorLogin').textContent = (falloLectura && falloLectura.code !== 'permission-denied')
-      ? 'No se pudo comprobar el permiso (' + falloLectura.code + '). Revisa tu internet.'
-      : 'Tu cuenta no tiene permiso de administrador.';
+    $('errorLogin').textContent = 'Tu cuenta no tiene permiso de administrador.';
     return;
   }
   $('correoAdmin').textContent = user.email || '';
   $('vistaLogin').hidden = true; $('vistaPanel').hidden = false;
   reiniciarInactividad();
   escucharUsuarios();
+  escucharSolicitudes();
 });
 
 // ====================== PANEL ======================
@@ -230,7 +214,7 @@ function escucharUsuarios() {
     const filas = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (a.nombre || '').localeCompare(b.nombre || ''));
     for (const u of filas) {
       const tr = document.createElement('tr');
-      for (const [txt, clase] of [[u.id], [u.nombre || ''], [pesos(u.saldo || 0), 'num']]) {
+      for (const [txt, clase] of [[u.id], [u.nombre || ''], [pesos(u.saldo || 0), 'num'], [u.pinHash ? '••••' : 'SIN PIN']]) {
         const td = document.createElement('td'); td.textContent = txt; if (clase) td.className = clase; tr.appendChild(td);
       }
       const tdAcc = document.createElement('td');
@@ -240,10 +224,107 @@ function escucharUsuarios() {
       bEd.onclick = () => { $('usrCelular').value = u.id; $('usrNombre').value = u.nombre || ''; $('usrNombre').focus(); };
       const bMov = document.createElement('button'); bMov.className = 'sec'; bMov.textContent = 'Movimientos'; bMov.style.marginLeft = '6px';
       bMov.onclick = () => verMovimientos(u);
-      tdAcc.append(bRec, bEd, bMov); tr.appendChild(tdAcc);
+      const bPin = document.createElement('button'); bPin.className = 'sec'; bPin.textContent = 'Nuevo PIN'; bPin.style.marginLeft = '6px';
+      bPin.onclick = () => regenerarPin(u);
+      tdAcc.append(bRec, bEd, bPin, bMov); tr.appendChild(tdAcc);
       tbody.appendChild(tr);
     }
   }, (e) => aviso('No se pudo leer la base de datos: ' + e.message, false));
+}
+
+// ---- solicitudes de recarga que llegan desde la ruleta ----
+function escucharSolicitudes() {
+  $('valorMoneda').textContent = pesos(VALOR_MONEDA_PESOS * 100);
+  const q = query(collection(db, 'solicitudes'), where('estado', '==', 'pendiente'));
+  cancelarSolic = onSnapshot(q, async (snap) => {
+    const token = ++tokenSolic;
+    const filas = [];
+    for (const d of snap.docs) {
+      const s = d.data();
+      let monedas = 0, nombre = null;
+      try { const j = await getDoc(doc(db, 'jugadores', d.id)); monedas = j.exists() ? (j.data().monedas || 0) : 0; } catch (e) {}
+      try { const u = await getDoc(doc(db, 'usuarios', s.celular)); nombre = u.exists() ? (u.data().nombre || '(sin nombre)') : null; } catch (e) {}
+      filas.push({ uid: d.id, celular: s.celular, monedas, nombre });
+    }
+    if (token !== tokenSolic) return;               // llegó una lista más nueva
+    const cont = $('listaSolicitudes'); cont.textContent = '';
+    if (!filas.length) {
+      const p = document.createElement('p'); p.className = 'nota'; p.textContent = 'No hay solicitudes pendientes.';
+      cont.appendChild(p); return;
+    }
+    for (const f of filas) cont.appendChild(filaSolicitud(f));
+  }, (e) => aviso('No se pudieron leer las solicitudes: ' + e.message, false));
+}
+
+function filaSolicitud(f) {
+  const div = document.createElement('div'); div.className = 'sol';
+  const info = document.createElement('div'); info.className = 'info';
+  const t1 = document.createElement('div'); t1.style.fontWeight = '600';
+  t1.textContent = (f.nombre || 'Número NO registrado') + ' · ' + f.celular;
+  const t2 = document.createElement('div'); t2.className = 'nota';
+  t2.textContent = 'Monedas del jugador: ' + f.monedas.toLocaleString('es-CO');
+  info.append(t1, t2);
+
+  const inp = document.createElement('input');
+  inp.inputMode = 'numeric'; inp.value = String(f.monedas); inp.title = 'Monedas a canjear';
+  inp.style.minWidth = '110px'; inp.style.width = '120px';
+  const val = document.createElement('span'); val.className = 'nota';
+  const monedasIngresadas = () => parseInt(soloDigitos(inp.value) || '0', 10);
+  const actualizar = () => { val.textContent = '= ' + pesos(monedasIngresadas() * VALOR_MONEDA_PESOS * 100); };
+  inp.addEventListener('input', actualizar); actualizar();
+
+  const bOk = document.createElement('button'); bOk.textContent = 'Aprobar';
+  bOk.disabled = !f.nombre || f.monedas <= 0;
+  bOk.onclick = () => aprobarSolicitud(f, monedasIngresadas());
+  const bNo = document.createElement('button'); bNo.className = 'sec'; bNo.textContent = 'Rechazar';
+  bNo.onclick = () => rechazarSolicitud(f);
+  div.append(info, inp, val, bOk, bNo);
+  return div;
+}
+
+async function aprobarSolicitud(f, monedasCanjear) {
+  const pesosRecarga = monedasCanjear * VALOR_MONEDA_PESOS;
+  if (monedasCanjear <= 0) { aviso('Escribe cuántas monedas canjear.', false); return; }
+  if (pesosRecarga > MAX_RECARGA_PESOS) { aviso('Supera el máximo permitido por recarga (' + pesos(MAX_RECARGA_PESOS * 100) + ').', false); return; }
+  if (!confirm('¿Recargar ' + pesos(pesosRecarga * 100) + ' a ' + f.nombre + ' (' + f.celular + ') por ' + monedasCanjear + ' monedas?')) return;
+
+  const referencia = 'G' + Date.now() + Math.floor(Math.random() * 1000);
+  const quien = auth.currentUser ? auth.currentUser.email : '';
+  try {
+    const nuevo = await runTransaction(db, async (t) => {
+      const refSol = doc(db, 'solicitudes', f.uid);
+      const refJug = doc(db, 'jugadores', f.uid);
+      const refUsr = doc(db, 'usuarios', f.celular);
+      const sol = await t.get(refSol);
+      const jug = await t.get(refJug);
+      const usr = await t.get(refUsr);
+      if (!sol.exists() || sol.data().estado !== 'pendiente') throw new Error('Esa solicitud ya fue revisada.');
+      if (sol.data().celular !== f.celular) throw new Error('La solicitud cambió. Actualiza la lista.');
+      if (!usr.exists()) throw new Error('Ese número no está registrado en Nequi.');
+      const monedas = jug.exists() ? (jug.data().monedas || 0) : 0;
+      if (monedasCanjear > monedas) throw new Error('El jugador solo tiene ' + monedas + ' monedas.');
+
+      const total = (usr.data().saldo || 0) + pesosRecarga * 100;
+      t.update(refUsr, { saldo: total });
+      t.set(doc(db, 'usuarios', f.celular, 'movimientos', referencia),
+            { tipo: 'recarga', origen: 'ruleta', monedas: monedasCanjear, monto: pesosRecarga * 100,
+              saldoDespues: total, por: quien, fecha: serverTimestamp() });
+      t.update(refJug, { monedas: monedas - monedasCanjear });
+      t.update(refSol, { estado: 'aprobada', monedasCanjeadas: monedasCanjear, pesos: pesosRecarga,
+                         revisadoPor: quien, revisado: serverTimestamp() });
+      return total;
+    });
+    aviso('Recarga aprobada. Nuevo saldo de ' + f.celular + ': ' + pesos(nuevo));
+  } catch (err) { aviso(err.message, false); }
+}
+
+async function rechazarSolicitud(f) {
+  if (!confirm('¿Rechazar la solicitud de ' + (f.nombre || f.celular) + '?')) return;
+  try {
+    await updateDoc(doc(db, 'solicitudes', f.uid),
+      { estado: 'rechazada', revisadoPor: auth.currentUser ? auth.currentUser.email : '', revisado: serverTimestamp() });
+    aviso('Solicitud rechazada.');
+  } catch (err) { aviso(err.message, false); }
 }
 
 function verMovimientos(u) {
@@ -257,7 +338,7 @@ function verMovimientos(u) {
       const m = d.data(); const tr = document.createElement('tr');
       const fecha = m.fecha && m.fecha.toDate ? m.fecha.toDate().toLocaleString('es-CO') : '';
       const detalle = m.tipo === 'envio' ? ('a ' + (m.nombreDestinatario || m.destinatario || ''))
-                    : (m.tipo === 'recarga' && m.por ? ('por ' + m.por) : '');
+                    : (m.tipo === 'recarga' ? ((m.origen === 'ruleta' ? 'ruleta · ' + (m.monedas || 0) + ' monedas · ' : '') + (m.por ? 'por ' + m.por : '')) : '');
       for (const [txt, clase] of [[fecha], [m.tipo || ''], [pesos(m.monto || 0), 'num'], [pesos(m.saldoDespues || 0), 'num'], [detalle]]) {
         const td = document.createElement('td'); td.textContent = txt; if (clase) td.className = clase; tr.appendChild(td);
       }
@@ -294,6 +375,67 @@ $('formRecarga').addEventListener('submit', async (e) => {
   } catch (err) { aviso(err.message, false); }
 });
 
+// ---- PIN de 4 dígitos: único por usuario ----
+// Cada PIN ocupado se reserva en pines/{sha256(pin)}; si el documento ya existe, ese PIN es de otro usuario.
+// Hay 10.000 combinaciones (0000-9999): es el máximo de usuarios que pueden tener PIN distinto.
+async function sha256(texto) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(texto));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+const claveReserva = (pin) => sha256('appfin-pin:' + pin);
+const hashPin = (celular, pin) => sha256('appfin:' + celular + ':' + pin);   // MISMA fórmula que UsuariosRepository.kt
+function pinAleatorio() {
+  const n = new Uint32Array(1);
+  do { crypto.getRandomValues(n); } while (n[0] >= 4294960000);            // sin sesgo: 4294960000 es múltiplo de 10000
+  return String(n[0] % 10000).padStart(4, '0');
+}
+function mostrarPin(titulo, pin) {
+  $('cajaPinTexto').textContent = titulo; $('cajaPinValor').textContent = pin; $('cajaPin').hidden = false;
+}
+$('cajaPinCerrar').onclick = () => { $('cajaPin').hidden = true; $('cajaPinValor').textContent = ''; };
+
+/** Asigna un PIN libre al usuario. Si [crear] trae datos, crea el usuario en la MISMA transacción (todo o nada). */
+async function asignarPin(celular, crear) {
+  const ref = doc(db, 'usuarios', celular);
+  // reservas anteriores de este usuario (para liberarlas al cambiar de PIN)
+  const viejas = (await getDocs(query(collection(db, 'pines'), where('celular', '==', celular)))).docs.map(d => d.ref);
+
+  for (let intento = 0; intento < 40; intento++) {
+    const pin = pinAleatorio();
+    const refReserva = doc(db, 'pines', await claveReserva(pin));
+    const hash = await hashPin(celular, pin);
+    try {
+      await runTransaction(db, async (t) => {
+        const reserva = await t.get(refReserva);
+        const usr = await t.get(ref);
+        if (reserva.exists()) throw Object.assign(new Error('pin repetido'), { repetido: true });
+        if (crear) {
+          if (usr.exists()) throw new Error('Ese usuario ya existe.');
+          t.set(ref, { nombre: crear.nombre, saldo: crear.saldo, pinHash: hash, creado: serverTimestamp() });
+        } else {
+          if (!usr.exists()) throw new Error('Ese número no está registrado.');
+          t.update(ref, { pinHash: hash });
+        }
+        for (const v of viejas) t.delete(v);
+        t.set(refReserva, { celular, creado: serverTimestamp() });
+      });
+      return pin;
+    } catch (err) {
+      if (!err.repetido) throw err;                                          // PIN ocupado: se sortea otro
+    }
+  }
+  throw new Error('No se encontró un PIN libre (¿ya hay cerca de 10.000 usuarios?).');
+}
+
+async function regenerarPin(u) {
+  if (!confirm('¿Generar un PIN nuevo para ' + (u.nombre || u.id) + '? El anterior dejará de funcionar.')) return;
+  try {
+    const pin = await asignarPin(u.id, null);
+    mostrarPin('Nuevo PIN de ' + (u.nombre || u.id) + ' (' + u.id + ')', pin);
+    aviso('PIN actualizado.');
+  } catch (err) { aviso(err.message, false); }
+}
+
 // ---- crear / editar usuario ----
 $('formUsuario').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -302,15 +444,16 @@ $('formUsuario').addEventListener('submit', async (e) => {
   if (celular.length !== 10 || !nombre) { aviso('Escribe un celular de 10 dígitos y un nombre.', false); return; }
   const ref = doc(db, 'usuarios', celular);
   try {
-    await runTransaction(db, async (t) => {
-      const snap = await t.get(ref);
-      if (snap.exists()) { t.update(ref, { nombre }); }                       // ya existe: solo cambia el nombre
-      else {
-        const saldo = parseInt(soloDigitos($('usrSaldo').value) || '0', 10) * 100;
-        t.set(ref, { nombre, saldo, creado: serverTimestamp() });
-      }
-    });
-    aviso('Usuario guardado: ' + nombre + ' (' + celular + ').');
+    const existe = (await getDoc(ref)).exists();
+    if (existe) {                                                            // ya existe: solo cambia el nombre
+      await updateDoc(ref, { nombre });
+      aviso('Usuario actualizado: ' + nombre + ' (' + celular + ').');
+      return;
+    }
+    const saldo = parseInt(soloDigitos($('usrSaldo').value) || '0', 10) * 100;
+    const pin = await asignarPin(celular, { nombre, saldo });                // se crea con su PIN único
+    mostrarPin('PIN de ' + nombre + ' (' + celular + ')', pin);
+    aviso('Usuario creado: ' + nombre + ' (' + celular + ').');
   } catch (err) { aviso(err.message, false); }
 });
 </script>
